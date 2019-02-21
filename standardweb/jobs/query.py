@@ -8,12 +8,13 @@ from sqlalchemy.orm import joinedload
 
 from standardweb import app, celery, db
 from standardweb import stats as statsd
-from standardweb.lib import api
+from standardweb.lib import api, geoip
 from standardweb.lib import helpers as h
+from standardweb.lib import player as libplayer
 from standardweb.lib.constants import *
 from standardweb.models import (
-    Group, PlayerStats, GroupInvite, Player, PlayerActivity, IPTracking,
-    ServerStatus, MojangStatus, Server
+    AuditLog, Group, PlayerStats, GroupInvite, Player, PlayerActivity,
+    IPTracking, ServerStatus, MojangStatus, Server,
 )
 
 
@@ -141,9 +142,34 @@ def _query_server(server, mojang_status):
     server_status = api.get_server_status(server) or {}
     
     player_stats = []
-    
+
+    players_to_sync_ban = Player.query.filter(
+        Player.uuid.in_(server_status.get('banned_uuids', [])),
+        Player.banned == False
+    ).all()
+
+    if players_to_sync_ban:
+        player_ids_to_sync_ban = [x.id for x in players_to_sync_ban]
+
+        Player.query.filter(
+            Player.id.in_(player_ids_to_sync_ban)
+        ).update({
+            'banned': True,
+        }, synchronize_session=False)
+
+        for player in players_to_sync_ban:
+            AuditLog.create(
+                AuditLog.PLAYER_BAN,
+                player_id=player.id,
+                username=player.username,
+                source='server_sync',
+                commit=False
+            )
+
+    players = server_status.get('players', [])
     online_player_ids = []
-    for player_info in server_status.get('players', []):
+    players_to_nok_ban = []
+    for player_info in players:
         username = player_info['username']
         uuid = player_info['uuid']
 
@@ -179,9 +205,18 @@ def _query_server(server, mojang_status):
             enter = PlayerActivity(server=server, player=player,
                                    activity_type=PLAYER_ACTIVITY_TYPES['enter'])
             enter.save(commit=False)
-        
-        # respect nicknames from the main server
+
         if server.id == app.config['MAIN_SERVER_ID']:
+            if player.banned:
+                player.banned = False
+                AuditLog.create(
+                    AuditLog.PLAYER_UNBAN,
+                    player_id=player.id,
+                    username=player.username,
+                    source='server_sync',
+                    commit=False
+                )
+
             nickname_ansi = player_info.get('nickname_ansi')
             nickname = player_info.get('nickname')
 
@@ -194,6 +229,9 @@ def _query_server(server, mojang_status):
             if not IPTracking.query.filter_by(ip=ip, player=player).first():
                 existing_player_ip = IPTracking(ip=ip, player=player)
                 existing_player_ip.save(commit=False)
+
+            if geoip.is_nok(ip):
+                players_to_nok_ban.append((player, ip))
 
         stats = PlayerStats.query.filter_by(server=server, player=player).first()
         if not stats:
@@ -213,6 +251,10 @@ def _query_server(server, mojang_status):
             'rank': stats.rank,
             'titles': titles
         })
+
+    if len(players) and (float(len(players_to_nok_ban)) / float(len(players))) < 0.5:
+        for player, ip in players_to_nok_ban:
+            libplayer.ban_player(player, with_ip=True, source='query', ip=ip, commit=False)
 
     five_minutes_ago = datetime.utcnow() - timedelta(minutes=10)
     result = PlayerStats.query.filter(PlayerStats.server == server,

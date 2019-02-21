@@ -1,13 +1,17 @@
 from datetime import datetime, timedelta
+import StringIO
 
-from flask import flash, g, redirect, request, render_template, session, url_for
+from flask import abort, flash, g, redirect, request, render_template, session, url_for, Response
+import pyotp
+import qrcode
 import rollbar
 from sqlalchemy import or_
 
 from standardweb import app, stats
-from standardweb.forms import LoginForm, VerifyEmailForm, ForgotPasswordForm, ResetPasswordForm
+from standardweb.forms import LoginForm, VerifyMFAForm, VerifyEmailForm, ForgotPasswordForm, ResetPasswordForm
 from standardweb.lib.email import send_reset_password
-from standardweb.models import Player, User, EmailToken
+from standardweb.models import AuditLog, EmailToken, ForumBan, Player, User
+from standardweb.views.decorators.auth import login_required
 from standardweb.views.decorators.ssl import ssl_required
 
 
@@ -27,12 +31,16 @@ def login():
         if player:
             user = player.user
         else:
+            # TODO: check renames
             user = User.query.filter(
                 or_(User.username == username, User.email == username)
             ).first()
 
         if user and user.check_password(password):
-            session['user_id'] = user.id
+            if not user.session_key:
+                user.generate_session_key(commit=False)
+
+            session['user_session_key'] = user.session_key
             session.permanent = True
 
             if not user.last_login:
@@ -43,6 +51,10 @@ def login():
 
             stats.incr('login.success')
 
+            if user.mfa_login:
+                session['mfa_stage'] = 'password-verified'
+                return redirect(url_for('verify_mfa', next=next_path))
+
             flash('Successfully logged in', 'success')
 
             return redirect(next_path or url_for('index'))
@@ -51,14 +63,77 @@ def login():
 
             stats.incr('login.invalid')
 
+            AuditLog.create(
+                AuditLog.INVALID_LOGIN,
+                username=username,
+                matched_user_id=user.id if user else None,
+                ip=request.remote_addr,
+                commit=True
+            )
+
             return render_template('login.html', form=form), 401
 
     return render_template('login.html', form=form)
 
 
+@app.route('/verify-mfa', methods=['GET', 'POST'])
+def verify_mfa():
+    if not session.get('user_session_key'):
+        abort(403)
+
+    if session.get('mfa_stage') != 'password-verified':
+        abort(403)
+
+    user = User.query.filter_by(
+        session_key=session['user_session_key']
+    ).first()
+
+    if not user:
+        abort(403)
+
+    form = VerifyMFAForm()
+
+    if form.validate_on_submit():
+        token = request.form['token']
+        next_path = request.form.get('next')
+
+        totp = pyotp.TOTP(user.mfa_secret)
+
+        if totp.verify(token):
+            session['mfa_stage'] = 'mfa-verified'
+            flash('Successfully logged in', 'success')
+
+            return redirect(next_path or url_for('index'))
+        else:
+            flash('Invalid code', 'error')
+
+    return render_template('verify_mfa.html', form=form)
+
+
+@app.route('/mfa-qr-code.png')
+@login_required()
+def mfa_qr_code():
+    user = g.user
+
+    if not user.mfa_secret:
+        user.mfa_secret = pyotp.random_base32()
+        user.save(commit=True)
+
+    totp = pyotp.TOTP(user.mfa_secret)
+    uri = totp.provisioning_uri(user.get_username(), 'Standard Survival')
+    image = qrcode.make(uri)
+
+    stream = StringIO.StringIO()
+    image.save(stream)
+    image = stream.getvalue()
+
+    return Response(image, mimetype='image/png')
+
+
 @app.route('/logout')
 def logout():
-    session.pop('user_id', None)
+    session.pop('user_session_key', None)
+    session.pop('mfa_stage', None)
 
     flash('Successfully logged out', 'success')
 
@@ -98,10 +173,24 @@ def create_account(token):
         return result
 
     if g.user:
-        rollbar.report_message('User already logged in when verifying creation email',
-                               level='warning', request=request)
+        if g.user.forum_ban:
+            session['forum_ban'] = True
+            session.permanent = True
+        if g.user.player.banned:
+            session['player_ban'] = True
+            session.permanent = True
 
-        session.pop('user_id', None)
+        rollbar.report_message(
+            'User already logged in when verifying creation email',
+            level='warning',
+            request=request,
+            extra_data={
+                'existing_forum_ban': bool(g.user.forum_ban),
+                'existing_player_ban': bool(g.user.player.banned)
+            }
+        )
+
+        session.pop('user_session_key', None)
         g.user = None
 
     form = VerifyEmailForm()
@@ -120,7 +209,24 @@ def create_account(token):
 
             user = User.create(player, password, email)
 
-            session['user_id'] = user.id
+            if session.get('forum_ban'):
+                rollbar.report_message(
+                    'Banning user associated with another forum banned user',
+                    level='error',
+                    request=request
+                )
+                ban = ForumBan(user_id=user.id)
+                ban.save(commit=True)
+            if session.get('player_ban'):
+                rollbar.report_message(
+                    'Banning player associated with another banned player',
+                    level='error',
+                    request=request
+                )
+                player.banned = True
+                player.save(commit=True)
+
+            session['user_session_key'] = user.session_key
             session['first_login'] = True
             session.permanent = True
 
@@ -128,12 +234,16 @@ def create_account(token):
 
             stats.incr('account.created')
 
-            rollbar.report_message('Account created', level='info', request=request,
-                                   extra_data={
-                                       'user_id': user.id,
-                                       'player_id': player.id,
-                                       'username': player.username
-                                   })
+            rollbar.report_message(
+                'Account created',
+                level='info',
+                request=request,
+                extra_data={
+                    'user_id': user.id,
+                    'player_id': player.id,
+                    'username': player.username
+                }
+            )
 
             return redirect(url_for('index'))
 
@@ -173,7 +283,7 @@ def reset_password(token):
         rollbar.report_message('User already logged in when resetting password',
                                level='warning', request=request)
 
-        session.pop('user_id', None)
+        session.pop('user_session_key', None)
         g.user = None
 
     form = ResetPasswordForm()
@@ -191,10 +301,10 @@ def reset_password(token):
 
             user.set_password(password, commit=False)
             user.last_login = datetime.utcnow()
+            user.generate_session_key(commit=False)
             user.save(commit=True)
 
-            session['user_id'] = user.id
-            session.permanent = True
+            session['user_session_key'] = user.session_key
 
             flash('Password reset', 'success')
 

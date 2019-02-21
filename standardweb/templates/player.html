@@ -26,17 +26,37 @@
             <div class="section-header">
                 <div class="pull-right align-right">
                     {% if current_user and player.user != current_user %}
-                        {% if current_user.admin_or_moderator and player.user %}
-                            {% if player.user.forum_ban %}
-                                Forum banned
-                            {% else %}
-                                <a class="btn btn-lite btn-danger confirm" href="{{ url_for('forum_ban', user_id=player.user.id) }}">Forum Ban</a>
-                            {% endif %}
-                            {% with profile = player.user.forum_profile %}
-                                {% if profile and profile.post_count %}
-                                    <a class="btn btn-lite btn-danger confirm" data-confirm-message="Are you absolutely sure? There is no way to undo this!" href="{{ url_for('delete_user_forum_posts', user_id=player.user.id) }}">Delete All Forum Posts</a>
+                        {% if current_user.admin_or_moderator %}
+                            {% if player.banned %}
+                                Server banned
+                                {% if ban_time %}{{ ban_time|from_now }} {% else %} - date unknown{% endif %}
+                                {% if ban_reason %} for: <b>{{ ban_reason }}</b>{% endif %}
+                                {% if ban_by_user %} | Ban given by: <b>
+                                    {% if ban_by_user.player %}
+                                        <a href="{{ url_for('player', server_id=server.id, username=ban_by_user.player.username) }}">
+                                            {{ ban_by_user.player.username|face_thumb(scaled_size=12) }}
+                                            {{ ban_by_user.player.displayname_html|safe }}
+                                        </a>
+                                    {% else %}
+                                        {{ ban_by_user.username }}
+                                    {% endif %}</b>
                                 {% endif %}
-                            {% endwith %}
+                                {% if ban_source %}| Ban source: <b>{{ ban_source }}</b>{% endif %}
+                            {% else %}
+                                <a class="btn btn-lite btn-danger ban" href="#">Server Ban</a>
+                            {% endif %}
+                            {% if player.user %}
+                                {% if player.user.forum_ban %}
+                                    <a class="btn btn-lite confirm" href="{{ url_for('forum_unban', user_id=player.user.id) }}">Forum Unban</a>
+                                {% else %}
+                                    <a class="btn btn-lite btn-danger confirm" href="{{ url_for('forum_ban', user_id=player.user.id) }}">Forum Ban</a>
+                                {% endif %}
+                                {% with profile = player.user.forum_profile %}
+                                    {% if profile and profile.post_count %}
+                                        <a class="btn btn-lite btn-danger confirm" data-confirm-message="Are you absolutely sure? There is no way to undo this!" href="{{ url_for('delete_user_forum_posts', user_id=player.user.id) }}">Delete All Forum Posts</a>
+                                    {% endif %}
+                                {% endwith %}
+                            {% endif %}
                         {% endif %}
                         <a class="btn btn-lite" href="{{ url_for('messages', username=player.username) }}">Send Message</a>
                     {% endif %}
@@ -81,7 +101,8 @@
                     </div>
                 </div>
                 {% if player.user %}
-                    {% with profile = player.user.forum_profile, last_post = profile.last_post %}
+                    {% with profile = player.user.forum_profile %}
+                        {% set last_post = profile.last_post %}
                         {% if profile and profile.post_count and last_post %}
                             <br>
                             <div class="section-stat">
@@ -312,26 +333,53 @@
                 });
             });
         </script>
-        {% if current_user and current_user.admin %}
-            <script type="application/javascript">
-                $('.adjust-time').on('click', function() {
-                    var dialog = new StandardWeb.InputDialog('Adjust player time', 'Adjustment:', 'minutes');
-                    dialog.positiveCallback = function(inputValue) {
-                        $.ajax({
-                            url: "{{ url_for('adjust_player_time', server_id=server.id, uuid=player.uuid) }}",
-                            type: 'POST',
-                            data: {adjustment: inputValue},
-                            success: function() {
-                                dialog.close();
-                                location.reload();
-                            }
-                        });
-                    };
+        {% if current_user %}
+            {% if current_user.admin_or_moderator %}
+                <script type="application/javascript">
+                    $('.ban').on('click', function() {
+                        var dialog = new StandardWeb.InputDialog('Server Ban', 'Reason:', '');
+                        dialog.positiveCallback = function(inputValue) {
+                            $.ajax({
+                                url: "{{ url_for('ban_player', uuid=player.uuid) }}",
+                                type: 'POST',
+                                data: {reason: inputValue},
+                                success: function() {
+                                    dialog.close();
+                                    location.reload();
+                                },
+                                error: function() {
+                                    dialog.close();
+                                    StandardWeb.alertManager.addAlert('error', 'There was a problem banning the user, please try again.');
+                                }
+                            });
+                        };
 
-                    dialog.show();
-                    return false;
-                });
-            </script>
+                        dialog.show();
+                        return false;
+                    });
+                </script>
+            {% endif %}
+            {% if current_user.admin %}
+                <script type="application/javascript">
+                    $('.adjust-time').on('click', function() {
+                        var dialog = new StandardWeb.InputDialog('Adjust player time', 'Adjustment:', 'minutes');
+                        dialog.positiveCallback = function(inputValue) {
+                            $.ajax({
+                                url: "{{ url_for('adjust_player_time', server_id=server.id, uuid=player.uuid) }}",
+                                type: 'POST',
+                                data: {adjustment: inputValue},
+                                success: function() {
+                                    dialog.close();
+                                    location.reload();
+                                }
+                            });
+                        };
+
+                        dialog.show();
+                        return false;
+                    });
+                </script>
+            {% endif %}
         {% endif %}
     {% endif %}
 {% endblock %}

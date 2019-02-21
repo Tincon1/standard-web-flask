@@ -3,8 +3,9 @@ import rollbar
 from standardweb import app
 from standardweb.lib.constants import *
 from standardweb.models import Server
-from standardweb.tasks.server_api import api_forum_post as api_forum_post_task
-from standardweb.tasks.server_api import api_new_message as api_new_message_task
+from standardweb.tasks.server_api import api_forum_post_task
+from standardweb.tasks.server_api import api_player_action_task
+from standardweb.tasks.server_api import api_new_message_task
 from standardweb.vendor.minecraft_api import MinecraftJsonApi
 
 
@@ -14,7 +15,7 @@ apis = {}
 def _global_console_command(command):
     for server in Server.query.filter_by(online=True):
         api = get_api(server.address)
-        
+
         api.call('runConsoleCommand', command)
 
 
@@ -36,7 +37,7 @@ def api_call(server, type, data=None):
         )
 
         return None
-    
+
     if not result or result.get('result') == API_CALL_RESULTS['exception']:
         extra_data = {
             'server_id': server.id,
@@ -51,7 +52,7 @@ def api_call(server, type, data=None):
         rollbar.report_message('Exception while calling server API', level='error',
                                extra_data=extra_data)
         return None
-    
+
     return result
 
 
@@ -64,7 +65,7 @@ def get_api(host):
             password=app.config['MC_API_PASSWORD'],
             salt=app.config['MC_API_SALT']
         )
-    
+
     return apis[host]
 
 
@@ -84,6 +85,26 @@ def send_player_stats(server, stats):
 
 def send_stats(server, data):
     api_call(server, 'stats', data=data)
+
+
+def ban_player(player, reason, with_ip):
+    api_player_action_task.apply_async((
+        player.uuid,
+        'ban',
+        reason,
+        None,
+        with_ip
+    ))
+
+
+def ban_ip(ip):
+    api_player_action_task.apply_async((
+        None,
+        'ban_ip',
+        None,
+        ip,
+        False
+    ))
 
 
 def forum_post(user, forum_name, topic_name, path, is_new_topic=False):

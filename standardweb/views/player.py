@@ -4,7 +4,7 @@ from sqlalchemy.orm import joinedload
 from standardweb import app
 from standardweb.lib import helpers as h
 from standardweb.lib import player as libplayer
-from standardweb.models import Server, Player, User, IPTracking
+from standardweb.models import IPTracking, Player, Server, User, AuditLog
 from standardweb.views.decorators.auth import login_required
 from standardweb.views.decorators.redirect import redirect_route
 
@@ -96,6 +96,28 @@ def player(username, server_id=None):
             'same_ip_player_list': same_ip_player_list
         })
 
+        if player.banned:
+            latest_audit = player.audit_logs.filter(
+                AuditLog.player == player,
+                AuditLog.type.in_(['player_ban', 'spam_ban', 'spam_shadow_mute_ban'])
+            ).order_by(
+                AuditLog.timestamp.desc()
+            ).first()
+
+            if latest_audit and latest_audit.data:
+                retval['ban_time'] = latest_audit.timestamp
+
+                if latest_audit.data.get('reason'):
+                    retval['ban_reason'] = latest_audit.data['reason']
+
+                if latest_audit.data.get('by_user_id'):
+                    retval['ban_by_user'] = User.query.get(latest_audit.data['by_user_id'])
+
+                if latest_audit.data.get('source'):
+                    retval['ban_source'] = latest_audit.data['source']
+                elif 'spam' in latest_audit.type:
+                    retval['ban_source'] = 'spam'
+
     return render_template(template, **retval)
 
 
@@ -116,6 +138,29 @@ def adjust_player_time(server_id, uuid):
         abort(400)
 
     player.adjust_time_spent(server, adjustment, reason='manual', commit=True)
+
+    return jsonify({
+        'err': 0
+    })
+
+
+@login_required(only_moderator=True)
+@app.route('/player/<uuid>/ban', methods=['POST'])
+def ban_player(uuid):
+    player = Player.query.filter_by(uuid=uuid).first()
+    if not player:
+        abort(404)
+
+    reason = request.form.get('reason') or None
+
+    libplayer.ban_player(
+        player,
+        reason=reason,
+        with_ip=True,
+        by_user_id=g.user.id,
+        source='user_ban_player',
+        commit=True
+    )
 
     return jsonify({
         'err': 0

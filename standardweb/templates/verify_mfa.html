@@ -1,28 +1,29 @@
 {% extends "base.html" %}
 
-{% block title %}Reset Password - Standard Survival Minecraft Server{% endblock %}
+{% block title %}Verify Two-factor Code - Standard Survival Minecraft Server{% endblock %}
 
 {% from 'includes/forms.html' import render_field %}
 
 {% block content %}
   <div class="container">
     <div class="center-form-section">
-      <form action="{{ url_for('reset_password', token=email_token.token) }}" method="post">
+      <form action="{{ url_for('verify_mfa') }}" method="post">
         {{ form.hidden_tag() }}
-        <h2>Reset your password</h2>
+        <h2>Enter your Google Authenticator code</h2>
         <fieldset>
           {% include 'includes/flash_messages.html' %}
-          <div class="control-group">
-            <label>Username</label>
-            <div class="control">{{ reset_user.get_username() }}</div>
-          </div>
 
-          {{ render_field(form.password) }}
-          {{ render_field(form.confirm_password) }}
+          {{ render_field(form.token) }}
 
           <div class="control-group">
             <div class="control">
-              <input class="btn" type="submit" value="Reset Password">
+              <input class="btn" type="submit" value="Submit">
+            </div>
+          </div>
+
+          <div class="control-group">
+            <div class="control">
+              <a href="mailto:server@standardsurvival.com?subject=I lost my phone">Lose your phone?</a>
             </div>
           </div>
         </fieldset>

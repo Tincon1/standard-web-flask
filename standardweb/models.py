@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 import hashlib
 from operator import attrgetter
 import os
+import random
+import string
 from pbkdf2 import pbkdf2_bin
 import pytz
 import re
@@ -92,9 +94,12 @@ class User(db.Model, Base):
     password = db.Column(db.String(128))
     admin = db.Column(db.Boolean, default=False)
     moderator = db.Column(db.Boolean, default=False)
+    mfa_login = db.Column(db.Boolean, default=False)
+    mfa_secret = db.Column(db.String(20))
     score = db.Column(db.Numeric(), default=0)
     last_login = db.Column(db.DateTime, default=None)
     date_joined = db.Column(db.DateTime, default=datetime.utcnow)
+    session_key = db.Column(db.String(32))
 
     player = db.relationship('Player', backref=db.backref('user', uselist=False))
 
@@ -108,6 +113,8 @@ class User(db.Model, Base):
         user.set_password(plaintext_password)
         user.last_login = datetime.utcnow()
         user.email = email
+
+        user.generate_session_key(commit=False)
 
         user.save(commit=False)
 
@@ -222,6 +229,10 @@ class User(db.Model, Base):
 
         return preference
 
+    def generate_session_key(self, commit=True):
+        self.session_key = ''.join(random.choice(string.ascii_lowercase + string.digits) for i in range(32))
+        self.save(commit=commit)
+
     @property
     def has_excellent_score(self):
         return self.score > app.config['EXCELLENT_SCORE_THRESHOLD']
@@ -323,6 +334,7 @@ class Player(db.Model, Base):
     username = db.Column(db.String(30))
     nickname = db.Column(db.String(30))
     nickname_ansi = db.Column(db.String(256))
+    banned = db.Column(db.Boolean, default=False)
 
     def __str__(self):
         return self.displayname
@@ -441,7 +453,7 @@ class Server(db.Model, Base):
     abbreviation = db.Column(db.String(10))
     address = db.Column(db.String(50))
     online = db.Column(db.Boolean())
-    secret_key = db.Column(db.String(10))
+    secret_key = db.Column(db.String(64))
     type = db.Column(db.String(20))
 
     @classmethod
@@ -575,7 +587,7 @@ class MaterialType(db.Model, Base):
     displayname = db.Column(db.String(64))
 
     ORES = (
-        'DIAMOND_ORE', 'EMERALD_ORE', 'LAPIS_ORE', 'REDSTONE_ORE', 'QUARTZ_ORE', 'COAL_ORE'
+        'DIAMOND_ORE', 'EMERALD_ORE', 'LAPIS_ORE', 'REDSTONE_ORE', 'NETHER_QUARTZ_ORE', 'COAL_ORE'
     )
 
     @classmethod
@@ -861,13 +873,18 @@ class AuditLog(db.Model, Base):
         'Player',
         backref=backref(
             'audit_logs',
-            order_by='AuditLog.timestamp',
             lazy='dynamic'
         )
     )
 
     PLAYER_TIME_ADJUSTMENT = 'player_time_adjustment'
     PLAYER_RENAME = 'player_rename'
+    PLAYER_BAN = 'player_ban'
+    PLAYER_UNBAN = 'player_unban'
+    QUICK_USER_CREATE = 'quick_user_create'
+    INVALID_LOGIN = 'invalid_login'
+    USER_FORUM_BAN = 'user_forum_ban'
+    USER_FORUM_UNBAN = 'user_forum_unban'
 
     @classmethod
     def create(cls, type, data=None, server_id=None, user_id=None, player_id=None, commit=True, **kw):
